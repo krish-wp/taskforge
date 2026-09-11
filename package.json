@@ -9,7 +9,8 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "nodemon ./src/server.js",
-    "migrate": "node ./src/db/migrate.js"
+    "migrate": "node ./src/db/migrate.js",
+    "loadtest": "node tests/load-test.js"
   },
   "keywords": [],
   "author": "",
