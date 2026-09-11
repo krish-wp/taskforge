@@ -1,4 +1,4 @@
-# taskforge
+# TaskForge
 
 A job queue system built with **Express 5**, **PostgreSQL**, and **Redis** — designed as a resume/portfolio project demonstrating backend infrastructure patterns.
 
@@ -9,51 +9,69 @@ A job queue system built with **Express 5**, **PostgreSQL**, and **Redis** — d
 | Feature | Status |
 |---------|--------|
 | **Create jobs** (`POST /api/v1/jobs`) | ✅ Accepts `type`, `payload`, optional `priority`, `max_attempts` |
-| **List all jobs** (`GET /api/v1/jobs`) | ✅ Returns all jobs (no pagination yet) |
+| **List jobs** (`GET /api/v1/jobs`) | ✅ Paginated with server-side status filter |
 | **Get job by ID** (`GET /api/v1/jobs/:id`) | ✅ 404 if not found |
 | **Update job** (`PUT /api/v1/jobs/:id`) | ✅ Partial updates via `COALESCE` |
-| **Recovery worker** | ✅ Forked child process that re-queues `PENDING` jobs with `queued_at IS NULL` |
-| **Redis queue** (`LPUSH`/`BRPOP`) | ✅ Enqueue/dequeue implemented, but no consumer processes jobs yet |
+| **Execution workers** | ✅ Forked child processes that dequeue and execute jobs with retry logic |
+| **Recovery worker** | ✅ Resets stuck RUNNING jobs (>5min) and re-queues PENDING jobs |
+| **Redis queue** (`LPUSH`/`BRPOP`) | ✅ FIFO queue with numbered workers |
+| **Real-time dashboard** | ✅ Socket.io pushes job updates to frontend every 2s |
+| **Frontend dashboard** | ✅ React + Vite + Tailwind with status cards, job table, and pagination |
 | **Migrations** | ✅ 3 migration files, idempotent via `IF NOT EXISTS` |
+| **Load test** | ✅ Concurrent job creation with progress bar and throughput report |
+
+---
+
+## API endpoints
+
+### Jobs
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/v1/jobs` | List jobs (paginated, filterable by status) |
+| `POST` | `/api/v1/jobs` | Create a new job |
+| `GET` | `/api/v1/jobs/:id` | Get job by ID |
+| `PUT` | `/api/v1/jobs/:id` | Update a job |
+
+**Query params for `GET /api/v1/jobs`:**
+- `limit` — items per page (default: 50, max: 100)
+- `offset` — pagination offset
+- `status` — filter by status (`PENDING`, `RUNNING`, `COMPLETED`, `FAILED`, `RETRYING`, `CANCELLED`, `DEAD`)
+
+**Response format:**
+```json
+{
+  "jobs": [...],
+  "pagination": {
+    "total": 1250,
+    "limit": 50,
+    "offset": 0,
+    "hasMore": true
+  }
+}
+```
+
+### Dashboard
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/v1/dashboard/stats` | Job counts by status |
+| `GET` | `/api/v1/dashboard/metrics` | Total, completed, failed, avg duration, throughput |
+| `GET` | `/api/v1/dashboard/recent` | Last 50 updated jobs |
 
 ---
 
 ## Technical highlights
 
-- **Forked child process** — recovery worker runs in a separate Node.js process, auto-respawns on crash with 5s backoff
-- **Async overlap prevention** — `setTimeout` chaining instead of `setInterval` guarantees no concurrent recovery runs
-- **Graceful degradation** — if Redis is down, jobs are still created in PostgreSQL and picked up later by the recovery worker
-- **Idempotent enqueue** — `WHERE queued_at IS NULL` guard prevents double-queuing the same job
+- **Forked child processes** — execution workers (configurable count, default 2) run in separate Node.js processes, auto-respawn on crash
+- **Numbered workers** — each worker gets a `WORKER_ID` for consistent logging and tracing
+- **Retry logic** — failed jobs re-queue up to `max_attempts`, then mark as `FAILED`
+- **Recovery worker** — resets stuck `RUNNING` jobs (>5min) back to `PENDING` and re-queues them
+- **Graceful degradation** — if Redis is down, jobs are still created in PostgreSQL and picked up later
+- **Idempotent enqueue** — `WHERE queued_at IS NULL` guard prevents double-queuing
 - **Parameterized SQL** — all queries use `$1`, `$2`, etc. (no string interpolation)
-- **Connection pooling** — `pg.Pool` handles connection lifecycle; transient errors don't kill the app
-- **Zero external config** — works out of the box with sensible defaults; no `.env` required
-
----
-
-## Roadmap — what could be added next
-
-### Tier 1 — Core (makes the queue actually work)
-
-1. **Consumer worker** — a process that `brPop`s job IDs from Redis, executes the job, updates status (`RUNNING`→`COMPLETED`/`FAILED`), and increments `attempts`. This is the biggest gap — without it, the queue drains nothing.
-
-2. **Retry / attempt logic** — on failure, re-enqueue up to `max_attempts`, then mark `DEAD`. The schema already has `attempts` and `max_attempts`; this just wires them together.
-
-3. **Priority queue** — replace single FIFO list with one Redis list per priority (`HIGH`/`MEDIUM`/`LOW`), pop highest first.
-
-### Tier 2 — Reliability (schema already supports these)
-
-4. **Worker heartbeats + stale-job reclaim** — the `workers` table has `last_heartbeat` and `current_job_id`. A crashed worker's `RUNNING` job gets automatically re-queued after a timeout.
-
-5. **Dead-letter queue** — jobs exceeding `max_attempts` move to a separate Redis list for inspection instead of being silently lost.
-
-### Tier 3 — API & polish
-
-6. **Pagination** — add `limit`/`offset` to `GET /api/v1/jobs`
-7. **DELETE endpoint** — complete the CRUD surface
-8. **Input validation** — reject malformed payloads before they hit the DB
-9. **Health check** — `GET /api/v1/health` returning `DB: ok, Redis: ok`
-10. **`.env` + `dotenv`** — `.env.example` for quick setup
-11. **Migration tracking** — `schema_migrations` table instead of re-running all files
+- **Server-side pagination** — `LIMIT`/`OFFSET` with status filtering, prevents loading all jobs
+- **Real-time updates** — Socket.io polls DB and pushes changes to connected clients
+- **Worker logging** — each worker writes to its own log file in `logs/`
+- **Zero external config** — works out of the box; no `.env` required
 
 ---
 
@@ -62,25 +80,39 @@ A job queue system built with **Express 5**, **PostgreSQL**, and **Redis** — d
 ```
 taskforge/
 ├── src/
-│   ├── server.js            # Entry point — creates app, forks recovery worker, connects DB/Redis
+│   ├── server.js              # Entry point — forks workers, connects DB/Redis
 │   ├── config/
-│   │   ├── db.js            # pg Pool with connection events
-│   │   └── redis.js         # Redis client + connectRedis / isRedisReady
+│   │   ├── db.js              # pg Pool with connection events
+│   │   └── redis.js           # Redis client + connectRedis / isRedisReady
 │   ├── routes/
-│   │   └── jobs.routes.js   # Express router: GET /, POST /, GET /:id, PUT /:id
+│   │   ├── jobs.routes.js     # Express router: GET /, POST /, GET /:id, PUT /:id
+│   │   └── dashboard.routes.js
 │   ├── controllers/
-│   │   └── jobs.controller.js  # Business logic: create, getAll, getById, update
+│   │   ├── jobs.controller.js    # CRUD + pagination + status filter
+│   │   └── dashboard.controller.js
 │   ├── queue/
-│   │   ├── queue.js         # enqueueJob (lPush) / dequeueJob (brPop)
-│   │   └── test-queue.js    # Manual script to verify enqueue/dequeue
+│   │   └── queue.js           # enqueueJob (lPush) / dequeueJob (brPop)
+│   ├── realtime/
+│   │   └── socket.js          # Socket.io server, polls DB every 2s
+│   ├── loging/
+│   │   └── logger.js          # Per-worker file logging
 │   └── worker/
-│       └── recovery_worker.js  # Forked child: recovers unqueued PENDING jobs every 60s
+│       ├── execution_worker.js   # Dequeues jobs, executes, handles retry
+│       └── recovery_worker.js    # Resets stuck jobs, re-queues pending
+├── dashboard/                 # Frontend (React + Vite + Tailwind)
+│   └── src/
+│       ├── App.jsx            # Dashboard + Jobs view with pagination
+│       ├── main.jsx
+│       └── index.css
+├── tests/
+│   └── load-test.js           # Concurrent job creation with progress bar
 ├── migrations/
 │   ├── 001_create_jobs_table.sql
 │   ├── 002_create_workers_table.sql
 │   └── 003_add_queue_at_.sql
-├── package.json             # Dependencies: express, pg, redis, nodemon
-├── docker-compose.yml       # Postgres + Redis services
+├── logs/                      # Per-worker log files (auto-created)
+├── package.json
+├── docker-compose.yml         # Postgres 17 + Redis 7
 └── README.md
 ```
 
@@ -98,10 +130,25 @@ docker-compose up -d
 # 3. Run migrations (creates tables if missing)
 npm run migrate
 
-# 4. Start the server
+# 4. Start the server (forks 2 execution workers + 1 recovery worker)
 npm run dev
 # Server runs on http://localhost:3000
-# Recovery worker forks automatically and respawns on crash
+
+# 5. Start the dashboard (separate terminal)
+cd dashboard && npm install && npm run dev
+# Dashboard runs on http://localhost:5173
+```
+
+---
+
+## Load test
+
+```bash
+# Run with defaults (50 jobs, concurrency 1)
+npm run loadtest
+
+# Custom settings
+TOTAL_JOBS=200 CONCURRENCY=10 npm run loadtest
 ```
 
 ---
