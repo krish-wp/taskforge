@@ -4,10 +4,39 @@ import { isRedisReady } from '../config/redis.js';
 
 export const getAllJobs = async (req, res) => {
   try {
-    const result = await pool.query(
-      'SELECT * FROM jobs ORDER BY created_at DESC',
-    );
-    res.json(result.rows);
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 50, 1), 100);
+    const offset = Math.max(parseInt(req.query.offset) || 0, 0);
+    const status = req.query.status || null;
+
+    let countQuery = 'SELECT COUNT(*) as total FROM jobs';
+    let dataQuery = 'SELECT * FROM jobs';
+    const params = [];
+    const countParams = [];
+
+    if (status) {
+      countQuery += ' WHERE status = $1';
+      dataQuery += ' WHERE status = $1';
+      params.push(status);
+      countParams.push(status);
+    }
+
+    dataQuery += ` ORDER BY created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+    params.push(limit, offset);
+
+    const countResult = await pool.query(countQuery, countParams);
+    const total = parseInt(countResult.rows[0].total);
+
+    const result = await pool.query(dataQuery, params);
+
+    res.json({
+      jobs: result.rows,
+      pagination: {
+        total,
+        limit,
+        offset,
+        hasMore: offset + limit < total,
+      },
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -41,7 +70,7 @@ export const createJob = async (req, res) => {
       );
     }
 
-    await res.status(201).json(job);
+    res.status(201).json(job);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
