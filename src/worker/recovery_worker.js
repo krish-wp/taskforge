@@ -1,16 +1,18 @@
 import pool from '../config/db.js';
 import { enqueueJob } from '../queue/queue.js';
 import redisClient, { isRedisReady, connectRedis } from '../config/redis.js';
+import workerLog from '../loging/logger.js';
+
+const WORKER_ID = process.env.WORKER_ID || '0';
+await connectRedis('recovery');
+
+// Don't query jobs if Redis is unavailable
 
 async function recoverJobs() {
-  await connectRedis();
-
-  // Don't query jobs if Redis is unavailable
   if (!isRedisReady()) {
     return;
   }
-
-  console.log('-->[Recovery] Checking for jobs to recover...');
+  workerLog('recovery', WORKER_ID, 'Checking for jobs to recover...');
 
   const staleResult = await pool.query(
     `UPDATE jobs 
@@ -20,13 +22,15 @@ async function recoverJobs() {
   worker_id = NULL,
   updated_at = NOW()
   WHERE status = $1 
-  AND updated_at < NOW() - INTERVAL '5 minutes'`,
+  AND updated_at < NOW() - INTERVAL '1 minutes'`,
     ['RUNNING', 'PENDING'],
   );
 
   if (staleResult.rowCount > 0) {
-    console.log(
-      `-->[Recovery] Reset ${staleResult.rowCount} stuck RUNNING jobs to PENDING`,
+    workerLog(
+      'recovery',
+      WORKER_ID,
+      `Reset ${staleResult.rowCount} stuck RUNNING jobs to PENDING/RUNNING`,
     );
   }
 
@@ -76,27 +80,27 @@ async function run() {
     try {
       await recoverJobs();
     } catch (error) {
-      console.error('-->[Recovery] Error:', error.message);
+      workerLog('recovery', WORKER_ID, `Error: ${error.message}`);
     }
-    await new Promise((resolve) => setTimeout(resolve, 6000));
+    await new Promise((resolve) => setTimeout(resolve, 60000));
   }
 
   // Graceful shutdown cleanup
   try {
     await redisClient.quit();
-    console.log('-->[Recovery] Redis connection closed');
+    workerLog('recovery', WORKER_ID, 'Redis connection closed');
   } catch (err) {
-    console.error('-->[Recovery] Error closing Redis:', err.message);
+    workerLog('recovery', WORKER_ID, `Error closing Redis: ${err.message}`);
   }
 
   try {
     await pool.end();
-    console.log('-->[Recovery] DB pool closed');
+    workerLog('recovery', WORKER_ID, 'DB pool closed');
   } catch (err) {
-    console.error('-->[Recovery] Error closing DB pool:', err.message);
+    workerLog('recovery', WORKER_ID, `Error closing DB pool: ${err.message}`);
   }
 
-  console.log('-->[Recovery] Exiting gracefully');
+  workerLog('recovery', WORKER_ID, 'Exiting gracefully');
   process.exit(0);
 }
 
