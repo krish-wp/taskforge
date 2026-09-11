@@ -12,6 +12,30 @@ initSocket(httpServer);
 
 const port = process.env.PORT || 3000;
 
+const initServer = async () => {
+  // Connect Redis FIRST
+  await connectRedis('server');
+
+  redisClient
+    .ping()
+    .then(() => console.log('-->[Redis] Ping successful'))
+    .catch((err) => console.error('-->[Redis] Ping failed:', err.message));
+
+  // Then DB check
+  await pool
+    .query('SELECT NOW()')
+    .then(() => console.log('-->[DB] Database connected'))
+    .catch((err) => console.error('-->[DB] Connection failed:', err.message));
+
+  // Then start server
+  httpServer.listen(port, () => {
+    console.log(`Server is running on port ${port}`);
+  });
+};
+
+// Start everything
+initServer();
+
 import jobsRouter from './routes/jobs.routes.js';
 import dashBoardRouter from './routes/dashboard.routes.js';
 
@@ -36,8 +60,10 @@ const startRecoveryWorker = () => {
   });
 };
 
-const startExecutionWorker = () => {
-  const executionWorker = fork('./src/worker/execution_worker.js');
+const startExecutionWorker = (id) => {
+  const executionWorker = fork('./src/worker/execution_worker.js', [], {
+    env: { ...process.env, WORKER_ID: id },
+  });
 
   executionWorker.on('error', (error) => {
     console.error('-->[Execution] Execution worker error:', error);
@@ -47,52 +73,13 @@ const startExecutionWorker = () => {
     console.log(
       `-->[Execution] Execution worker stopped with code ${code}; restarting...`,
     );
-    startExecutionWorker();
+    startExecutionWorker(id);
   });
 };
-
-// const startMonitorWorker = () => {
-//   const moniterWorker = fork('./src/output/moniter.js');
-
-//   moniterWorker.on('error', (error) => {
-//     console.error('-->[Moniter] Moniter worker error:', error);
-//   });
-
-//   moniterWorker.on('exit', (code) => {
-//     console.log(
-//       `-->[Moniter] Moniter worker stopped with code ${code}; restarting...`,
-//     );
-
-//   });
-// };
 
 startRecoveryWorker();
 
-const WORKER_COUNT = Number(process.env.EXECUTION_WORKERS) || 10;
+const WORKER_COUNT = Number(process.env.EXECUTION_WORKERS) || 2;
 for (let i = 0; i < WORKER_COUNT; i++) {
-  startExecutionWorker();
+  startExecutionWorker(i);
 }
-
-const initServer = async () => {
-  // Connect Redis FIRST
-  await connectRedis();
-
-  redisClient
-    .ping()
-    .then(() => console.log('-->[Redis] Ping successful'))
-    .catch((err) => console.error('-->[Redis] Ping failed:', err.message));
-
-  // Then DB check
-  await pool
-    .query('SELECT NOW()')
-    .then(() => console.log('-->[DB] Database connected'))
-    .catch((err) => console.error('-->[DB] Connection failed:', err.message));
-
-  // Then start server
-  httpServer.listen(port, () => {
-    console.log(`Server is running on port ${port}`);
-  });
-};
-
-// Start everything
-initServer();
