@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { io } from 'socket.io-client';
 
-const socket = io('http://localhost:3000');
+const socket = io();
 
 const STATUS_COLORS = {
   PENDING: 'bg-yellow-100 text-yellow-700 border-yellow-400',
@@ -9,6 +9,8 @@ const STATUS_COLORS = {
   COMPLETED: 'bg-green-100 text-green-700 border-green-400',
   FAILED: 'bg-red-100 text-red-700 border-red-400',
   RETRYING: 'bg-orange-100 text-orange-700 border-orange-400',
+  CANCELLED: 'bg-gray-100 text-gray-700 border-gray-400',
+  DEAD: 'bg-purple-100 text-purple-700 border-purple-400',
 };
 
 const CARD_COLORS = {
@@ -16,17 +18,23 @@ const CARD_COLORS = {
   RUNNING: 'border-l-cyan-400 bg-cyan-50',
   COMPLETED: 'border-l-green-400 bg-green-50',
   FAILED: 'border-l-red-400 bg-red-50',
+  RETRYING: 'border-l-orange-400 bg-orange-50',
+  CANCELLED: 'border-l-gray-400 bg-gray-50',
+  DEAD: 'border-l-purple-400 bg-purple-50',
 };
 
-const FILTERS = ['ALL', 'PENDING', 'RUNNING', 'COMPLETED', 'FAILED'];
+const FILTERS = ['ALL', 'PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'RETRYING', 'CANCELLED', 'DEAD'];
 
 export default function App() {
-  const [stats, setStats] = useState({ PENDING: 0, RUNNING: 0, COMPLETED: 0, FAILED: 0 });
+  const [stats, setStats] = useState({ PENDING: 0, RUNNING: 0, COMPLETED: 0, FAILED: 0, RETRYING: 0, CANCELLED: 0, DEAD: 0 });
   const [jobs, setJobs] = useState([]);
   const [connected, setConnected] = useState(false);
   const [currentView, setCurrentView] = useState('dashboard');
   const [allJobs, setAllJobs] = useState([]);
   const [activeFilter, setActiveFilter] = useState('ALL');
+  const [page, setPage] = useState(0);
+  const [totalJobs, setTotalJobs] = useState(0);
+  const PAGE_SIZE = 50;
 
   // Fetch initial data
   useEffect(() => {
@@ -41,15 +49,19 @@ export default function App() {
       .catch(console.error);
   }, []);
 
-  // Fetch all jobs when switching to Jobs view
+  // Fetch jobs when switching to Jobs view, page, or filter changes
   useEffect(() => {
     if (currentView === 'jobs') {
-      fetch('/api/v1/jobs')
+      const statusParam = activeFilter !== 'ALL' ? `&status=${activeFilter}` : '';
+      fetch(`/api/v1/jobs?limit=${PAGE_SIZE}&offset=${page * PAGE_SIZE}${statusParam}`)
         .then((res) => res.json())
-        .then(setAllJobs)
+        .then((data) => {
+          setAllJobs(data.jobs || []);
+          setTotalJobs(data.pagination?.total || 0);
+        })
         .catch(console.error);
     }
-  }, [currentView]);
+  }, [currentView, page, activeFilter]);
 
   // Socket.io connection
   useEffect(() => {
@@ -65,7 +77,6 @@ export default function App() {
           .slice(0, 50);
       });
 
-      // Also update allJobs if on Jobs view
       if (currentView === 'jobs') {
         setAllJobs((prev) => {
           const map = new Map(prev.map((j) => [j.id, j]));
@@ -75,13 +86,11 @@ export default function App() {
         });
       }
 
-      setStats((prev) => {
-        const newStats = { PENDING: 0, RUNNING: 0, COMPLETED: 0, FAILED: 0 };
-        updatedJobs.forEach((j) => {
-          if (newStats[j.status] !== undefined) newStats[j.status]++;
-        });
-        return { ...prev, ...newStats };
-      });
+      // Re-fetch accurate stats from server
+      fetch('/api/v1/dashboard/stats')
+        .then((res) => res.json())
+        .then(setStats)
+        .catch(console.error);
     });
 
     return () => {
@@ -102,9 +111,12 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
-  const filteredJobs = activeFilter === 'ALL'
-    ? allJobs
-    : allJobs.filter((j) => j.status === activeFilter);
+  const totalPages = Math.ceil(totalJobs / PAGE_SIZE);
+
+  // Reset page when filter changes
+  useEffect(() => {
+    setPage(0);
+  }, [activeFilter]);
 
   return (
     <div className="min-h-screen flex">
@@ -148,7 +160,7 @@ export default function App() {
             <h2 className="text-3xl font-bold text-gray-800 mb-8">Dashboard</h2>
 
             {/* Status Cards */}
-            <div className="grid grid-cols-4 gap-6 mb-8">
+            <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4 mb-8">
               {Object.entries(stats).map(([status, count]) => (
                 <div
                   key={status}
@@ -238,7 +250,7 @@ export default function App() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                  {filteredJobs.map((job) => (
+                  {allJobs.map((job) => (
                     <tr key={job.id} className="hover:bg-gray-50">
                       <td className="px-6 py-4 text-sm font-mono text-gray-600">#{job.id}</td>
                       <td className="px-6 py-4 text-sm text-gray-800">{job.type}</td>
@@ -255,7 +267,7 @@ export default function App() {
                       </td>
                     </tr>
                   ))}
-                  {filteredJobs.length === 0 && (
+                  {allJobs.length === 0 && (
                     <tr>
                       <td colSpan="5" className="px-6 py-8 text-center text-gray-400">
                         No {activeFilter !== 'ALL' ? activeFilter.toLowerCase() : ''} jobs found.
@@ -264,6 +276,32 @@ export default function App() {
                   )}
                 </tbody>
               </table>
+            </div>
+
+            {/* Pagination */}
+            <div className="flex items-center justify-between mt-4">
+              <p className="text-sm text-gray-500">
+                Showing {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, totalJobs)} of {totalJobs}
+              </p>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setPage((p) => Math.max(0, p - 1))}
+                  disabled={page === 0}
+                  className="px-4 py-2 rounded text-sm font-medium bg-gray-200 text-gray-600 hover:bg-gray-300 disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  Previous
+                </button>
+                <span className="px-4 py-2 text-sm text-gray-600">
+                  Page {page + 1} of {totalPages || 1}
+                </span>
+                <button
+                  onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+                  disabled={page >= totalPages - 1}
+                  className="px-4 py-2 rounded text-sm font-medium bg-gray-200 text-gray-600 hover:bg-gray-300 disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  Next
+                </button>
+              </div>
             </div>
           </>
         )}
